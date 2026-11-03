@@ -59,5 +59,29 @@ final class CreateDraftFilesProjectMapperTests: GekoUnitTestCase {
             ]
         )
     }
-}
 
+    func test_map_whenPreservationEnabled_keepsExistingGeneratedDraftAsSource() throws {
+        let root = try temporaryPath()
+        let generated = root.appending(components: "Generated", "Resources.swift")
+        try FileHandler.shared.createFolder(generated.parentDirectory)
+        try FileHandler.shared.write("enum Resources {}", path: generated, atomically: true)
+        var project = Project.test(path: root, targets: [Target.test(preCreatedFiles: ["Generated/Resources.swift"])])
+        var sideTable = ProjectSideTable()
+
+        let effects = try CreateDraftFilesProjectMapper(preserveGeneratedDrafts: true)
+            .map(project: &project, sideTable: &sideTable)
+        try SideEffectDescriptorExecutor().execute(sideEffects: effects)
+
+        XCTAssertEqual(try FileHandler.shared.readTextFile(generated), "enum Resources {}")
+        XCTAssertTrue(project.targets[0].sources.contains { $0.paths.contains(generated) })
+
+        try FileHandler.shared.delete(generated)
+        var freshProject = Project.test(path: root, targets: [Target.test(preCreatedFiles: ["Generated/Resources.swift"])])
+        let missingEffects = try CreateDraftFilesProjectMapper(preserveGeneratedDrafts: true)
+            .map(project: &freshProject, sideTable: &sideTable)
+        try SideEffectDescriptorExecutor().execute(sideEffects: missingEffects)
+        XCTAssertTrue(FileHandler.shared.exists(generated))
+        XCTAssertEqual(try FileHandler.shared.readTextFile(generated), "")
+        XCTAssertTrue(freshProject.targets[0].sources.contains { $0.paths.contains(generated) })
+    }
+}

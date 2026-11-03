@@ -4,7 +4,16 @@ import GekoSupport
 import ProjectDescription
 
 public final class CreateDraftFilesProjectMapper: ProjectMapping {
-    public init() {}
+    private let fileHandler: FileHandling
+    private let preserveGeneratedDrafts: Bool
+
+    public init(
+        fileHandler: FileHandling = FileHandler.shared,
+        preserveGeneratedDrafts: Bool = Environment.shared.generationScriptCacheConfigurationPath != nil
+    ) {
+        self.fileHandler = fileHandler
+        self.preserveGeneratedDrafts = preserveGeneratedDrafts
+    }
 
     public func map(
         project: inout Project,
@@ -34,9 +43,14 @@ public final class CreateDraftFilesProjectMapper: ProjectMapping {
 
                 targetSourceFiles.append(absolutePath)
 
-                descriptors.append(.file(
-                    .init(path: absolutePath, state: .present)
-                ))
+                // With preservation enabled, filled generated files survive warm generation
+                // and only missing placeholders are created. Without it, the descriptor keeps
+                // the stock recreate-and-truncate behavior.
+                if !preserveGeneratedDrafts || !fileHandler.exists(absolutePath) {
+                    descriptors.append(.file(
+                        .init(path: absolutePath, state: .present)
+                    ))
+                }
             }
 
             project.targets[targetIdx].sources.append(SourceFiles(paths: targetSourceFiles))

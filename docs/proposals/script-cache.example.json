@@ -1,0 +1,11 @@
+{
+  "scripts": {
+    "SwiftGen": {
+      "additionalInputs": [
+        "swiftgen",
+        ".geko/Plugins/SwiftgenPlugin/Executables/SwiftgenWrapper",
+        "Geko/Dependencies/Cocoapods/SwiftGen/bin/swiftgen"
+      ]
+    }
+  }
+}

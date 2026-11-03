@@ -162,6 +162,22 @@ public class Environment: Environmenting {
         return Constants.trueValues.contains(variable)
     }
 
+    /// Returns the configuration file path of the experimental generation script cache, if the cache is enabled.
+    public var generationScriptCacheConfigurationPath: String? {
+        guard let variable = ProcessInfo.processInfo.environment[Constants.EnvironmentVariables.experimentalScriptCache],
+              !variable.isEmpty
+        else { return nil }
+        return variable
+    }
+
+    /// Returns true if generation should stop right after cache target hashing (experimental diagnostic mode).
+    public var isGenerateHashOnlyEnabled: Bool {
+        guard let variable = ProcessInfo.processInfo.environment[Constants.EnvironmentVariables.experimentalGenerateHashOnly] else {
+            return false
+        }
+        return Constants.trueValues.contains(variable)
+    }
+
     /// Returns the directory where all the versions are.
     public var versionsDirectory: AbsolutePath {
         if let envVariable = ProcessInfo.processInfo.environment[Constants.EnvironmentVariables.forceConfigCacheDirectory] {
@@ -222,5 +238,23 @@ public class Environment: Environmenting {
         return envVar.split(separator: ",")
             .map { $0.trimmingCharacters(in: .whitespaces) }
             .filter { !$0.isEmpty }
+    }
+}
+
+public extension Environmenting {
+    /// Returns the configuration file path of the experimental generation script cache, if the cache is enabled.
+    var generationScriptCacheConfigurationPath: String? {
+        guard let variable = ProcessInfo.processInfo.environment[Constants.EnvironmentVariables.experimentalScriptCache],
+              !variable.isEmpty
+        else { return nil }
+        return variable
+    }
+
+    /// Returns true if generation should stop right after cache target hashing (experimental diagnostic mode).
+    var isGenerateHashOnlyEnabled: Bool {
+        guard let variable = ProcessInfo.processInfo.environment[Constants.EnvironmentVariables.experimentalGenerateHashOnly] else {
+            return false
+        }
+        return Constants.trueValues.contains(variable)
     }
 }

@@ -8,13 +8,16 @@ import ProjectDescription
 public final class DeleteDerivedDirectoryWorkspaceMapper: WorkspaceMapping {
     private let derivedDirectoryName: String
     private let fileHandler: FileHandling
+    private let preserveGeneratedDrafts: Bool
 
     public init(
         derivedDirectoryName: String = Constants.DerivedDirectory.name,
-        fileHandler: FileHandling = FileHandler.shared
+        fileHandler: FileHandling = FileHandler.shared,
+        preserveGeneratedDrafts: Bool = Environment.shared.generationScriptCacheConfigurationPath != nil
     ) {
         self.derivedDirectoryName = derivedDirectoryName
         self.fileHandler = fileHandler
+        self.preserveGeneratedDrafts = preserveGeneratedDrafts
     }
 
     // MARK: - ProjectMapping
@@ -42,6 +45,20 @@ public final class DeleteDerivedDirectoryWorkspaceMapper: WorkspaceMapping {
         
         guard fileHandler.exists(derivedDirectoryPath) else {
             return []
+        }
+
+        // With the script cache enabled, these sources are generated before target hashing and
+        // reused across warm generations. Deleting their parent tree would invalidate every warm
+        // output before the gate runs. Without the cache the stock cleanup keeps running.
+        if preserveGeneratedDrafts {
+            let hasGeneratedDrafts = try project.targets.flatMap(\.preCreatedFiles).contains { file in
+                let path = project.path.appending(try RelativePath(validatingRelativePath: file))
+                return path == derivedDirectoryPath || path.isDescendant(of: derivedDirectoryPath)
+            }
+            if hasGeneratedDrafts {
+                logger.debug("Preserving \(derivedDirectoryPath) for declared preCreatedFiles")
+                return []
+            }
         }
         
         // FIXME: Currently, the behavior for local spm packages differs from remote ones.

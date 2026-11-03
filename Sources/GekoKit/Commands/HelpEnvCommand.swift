@@ -46,6 +46,10 @@ struct HelpEnvCommand: AsyncParsableCommand {
             return "Enable swift module cache. Defaults to `false`. This variable has higher precedence than `.profile(options: .options(swiftModuleCacheEnabled:))` in `Config.swift`."
         case .forceBuildCacheDirectory:
             return "Customize cache build directory. Default value is not specified. This environment variable has higher precedence than `Cache(path:)` in `Config.swift`."
+        case .experimentalScriptCache:
+            return "Experimental. Path to a JSON configuration that enables the local generation script cache for cache-profile target scripts. Unset by default."
+        case .experimentalGenerateHashOnly:
+            return "Experimental diagnostic. Stops generation right after cache target hashing, skipping artifact lookup, project generation, and compilation. Unset by default."
         }
     }
 

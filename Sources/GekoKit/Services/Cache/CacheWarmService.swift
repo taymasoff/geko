@@ -88,8 +88,18 @@ final class CacheWarmService {
             handoff: handoff
         )
         
+        if Environment.shared.isGenerateHashOnlyEnabled {
+            logger.notice("Experimental diagnostic: generation will stop after cache target hashing")
+        }
+
         for task in tasks {
             try await task.run(context: &context)
+            // Experimental measurement mode: hash diagnostics remain useful when cache-miss builds fail.
+            if task is CacheGraphContentHashingTask,
+               Environment.shared.isGenerateHashOnlyEnabled {
+                logger.notice("Experimental diagnostic: stopped after cache target hashing")
+                break
+            }
         }
 
         if let workspacePath = context.workspacePath {

@@ -94,6 +94,8 @@ public enum Constants {
         case requestTimeout = "GEKO_REQUEST_TIMEOUT"
         case swiftModuleCache = "GEKO_SWIFTMODULE_CACHE_ENABLED"
         case forceBuildCacheDirectory = "GEKO_CONFIG_BUILD_CACHE_DIR"
+        case experimentalScriptCache = "GEKO_CONFIG_EXPERIMENTAL_SCRIPT_CACHE"
+        case experimentalGenerateHashOnly = "GEKO_CONFIG_EXPERIMENTAL_GENERATE_HASH_ONLY"
 
         // Hidden variables meant for testing
 

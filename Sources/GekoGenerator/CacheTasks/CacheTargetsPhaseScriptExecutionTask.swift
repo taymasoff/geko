@@ -20,16 +20,22 @@ public final class CacheTargetsPhaseScriptExecutionTask: CacheTask {
         let script: String
         let projectDirPath: AbsolutePath
         let env: [String: String]
+        let originalScript: TargetScript
+        let identity: String
         
         init(
             shellPath: String,
             script: String,
             projectDirPath: AbsolutePath,
-            env: [String: SettingValue]
+            env: [String: SettingValue],
+            originalScript: TargetScript,
+            identity: String
         ) {
             self.shellPath = shellPath
             self.script = script
             self.projectDirPath = projectDirPath
+            self.originalScript = originalScript
+            self.identity = identity
             self.env = Dictionary(uniqueKeysWithValues: env.map { key, value in
                 switch value {
                 case let .string(stringValue):
@@ -44,7 +50,7 @@ public final class CacheTargetsPhaseScriptExecutionTask: CacheTask {
             var command = [shellPath, "-c"]
             // Change current execution directory to pbxproject location
             let script = """
-            cd \(projectDirPath)
+            cd \(projectDirPath.pathString.spm_shellEscaped()) || exit $?
             \(script)
             """
             command.append(script)
@@ -54,16 +60,36 @@ public final class CacheTargetsPhaseScriptExecutionTask: CacheTask {
     }
     
     // MARK: - Attributes
-    
+
     @Atomic var preparedScripts: [PreparedScript] = []
-    
+    private let clock: Clock
+    private let timeTakenLoggerFormatter: TimeTakenLoggerFormatting
+    private let makeScriptCache: (AbsolutePath) -> GenerationScriptCaching?
+
     // MARK: - Init
-    
-    public init() {}
+
+    public convenience init() {
+        self.init(
+            clock: WallClock(),
+            timeTakenLoggerFormatter: TimeTakenLoggerFormatter(),
+            makeScriptCache: GenerationScriptCache.makeIfEnabled
+        )
+    }
+
+    init(
+        clock: Clock,
+        timeTakenLoggerFormatter: TimeTakenLoggerFormatting,
+        makeScriptCache: @escaping (AbsolutePath) -> GenerationScriptCaching?
+    ) {
+        self.clock = clock
+        self.timeTakenLoggerFormatter = timeTakenLoggerFormatter
+        self.makeScriptCache = makeScriptCache
+    }
     
     // MARK: - CacheTask
 
     public func run(context: inout CacheContext) async throws {
+        _preparedScripts.wrappedValue = []
         /// Dictionary, where the key is the name of the script, and the value is additional env for resolve
         let scriptEnvs = Dictionary(uniqueKeysWithValues: context.cacheProfile.scripts.map { ($0.name, $0.envKeys) })
         let enforceExplicitDependencies = context.config.generationOptions.enforceExplicitDependencies
@@ -107,7 +133,14 @@ public final class CacheTargetsPhaseScriptExecutionTask: CacheTask {
                                 shellPath: script.shellPath,
                                 script: modifiedShellScript,
                                 projectDirPath: target.projectDirPath,
-                                env: mergedEnvironment
+                                env: mergedEnvironment,
+                                originalScript: script,
+                                identity: identity(
+                                    target: target,
+                                    script: script,
+                                    workspacePath: graph.workspace.path,
+                                    profileName: context.cacheProfile.name
+                                )
                             )
                         )
                     }
@@ -115,12 +148,72 @@ public final class CacheTargetsPhaseScriptExecutionTask: CacheTask {
             }
         }
 
-        try _preparedScripts.wrappedValue.forEach(context: .concurrent) { script in
-            _ = try System.shared.capture(script.command, verbose: false, environment: script.env)
+        let cache = makeScriptCache(graph.workspace.path)
+        let timer = clock.startTimer()
+        let scripts = _preparedScripts.wrappedValue
+        let declarations = scripts.map { script in
+            cache?.declaration(script: script.originalScript, directory: script.projectDirPath, environment: script.env)
+        }
+        let invocations = cache?.independent(scripts.map { script in
+            cache?.prepare(
+                script: script.originalScript, identity: script.identity, command: script.command,
+                directory: script.projectDirPath, environment: script.env
+            )
+        }, declarations: declarations) ?? Array(repeating: nil, count: scripts.count)
+        let counts = Atomic(wrappedValue: (skipped: 0, ineligible: 0))
+        try Array(scripts.indices).forEach(context: .concurrent) { index in
+            let script = scripts[index]
+            let run = {
+                _ = try System.shared.capture(script.command, verbose: false, environment: script.env)
+            }
+            if let cache {
+                let outcome = try cache.execute(invocations[index], run: run)
+                if outcome == .ineligible {
+                    logger.debug("Generation script cache: executed ineligible invocation \(script.identity) (\(script.originalScript.name))")
+                }
+                counts.modify {
+                    switch outcome {
+                    case .skipped: $0.skipped += 1
+                    case .ineligible: $0.ineligible += 1
+                    case .executed: break
+                    }
+                }
+            } else {
+                try run()
+            }
+        }
+        if let cache {
+            let result = counts.wrappedValue
+            logger.info(
+                "Generation script cache: skipped \(result.skipped)/\(scripts.count), executed \(scripts.count - result.skipped), ineligible \(result.ineligible), \(timeTakenLoggerFormatter.timeTakenMessage(for: timer))",
+                metadata: .subsection
+            )
+        } else if Environment.shared.isGenerateHashOnlyEnabled {
+            logger.info(
+                "Generation scripts: cache disabled, executed \(scripts.count), \(timeTakenLoggerFormatter.timeTakenMessage(for: timer))",
+                metadata: .subsection
+            )
         }
     }
     
     // MARK: - Helpers
+
+    /// A record identity is stable across workspace relocations and distinguishes cache profiles,
+    /// which resolve different script environments for the same target.
+    func identity(
+        target: TargetWithScripts,
+        script: TargetScript,
+        workspacePath: AbsolutePath,
+        profileName: String
+    ) -> String {
+        let workspace = workspacePath.pathString
+        let project = target.graphTarget.project.path.pathString
+        let relativeProject = project.hasPrefix(workspace + "/")
+            ? String(project.dropFirst(workspace.count + 1))
+            : project
+        let scriptIndex = target.graphTarget.target.scripts.firstIndex(of: script) ?? 0
+        return "\(profileName)/\(relativeProject)/\(target.graphTarget.target.name)/\(scriptIndex)"
+    }
 
     /// Filter available projects and scripts
     func filterTargetsWithBuildPhaseScripts(
