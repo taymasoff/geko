@@ -162,22 +162,6 @@ public class Environment: Environmenting {
         return Constants.trueValues.contains(variable)
     }
 
-    /// Returns the configuration file path of the experimental generation script cache, if the cache is enabled.
-    public var generationScriptCacheConfigurationPath: String? {
-        guard let variable = ProcessInfo.processInfo.environment[Constants.EnvironmentVariables.experimentalScriptCache],
-              !variable.isEmpty
-        else { return nil }
-        return variable
-    }
-
-    /// Returns true if generation should stop right after cache target hashing (experimental diagnostic mode).
-    public var isGenerateHashOnlyEnabled: Bool {
-        guard let variable = ProcessInfo.processInfo.environment[Constants.EnvironmentVariables.experimentalGenerateHashOnly] else {
-            return false
-        }
-        return Constants.trueValues.contains(variable)
-    }
-
     /// Returns the directory where all the versions are.
     public var versionsDirectory: AbsolutePath {
         if let envVariable = ProcessInfo.processInfo.environment[Constants.EnvironmentVariables.forceConfigCacheDirectory] {
@@ -242,12 +226,12 @@ public class Environment: Environmenting {
 }
 
 public extension Environmenting {
-    /// Returns the configuration file path of the experimental generation script cache, if the cache is enabled.
-    var generationScriptCacheConfigurationPath: String? {
-        guard let variable = ProcessInfo.processInfo.environment[Constants.EnvironmentVariables.experimentalScriptCache],
-              !variable.isEmpty
-        else { return nil }
-        return variable
+    /// Returns true if the local generation script cache is enabled for cache-profile target scripts.
+    var isScriptCacheEnabled: Bool {
+        guard let variable = ProcessInfo.processInfo.environment[Constants.EnvironmentVariables.scriptCacheEnabled] else {
+            return false
+        }
+        return Constants.trueValues.contains(variable)
     }
 
     /// Returns true if generation should stop right after cache target hashing (experimental diagnostic mode).

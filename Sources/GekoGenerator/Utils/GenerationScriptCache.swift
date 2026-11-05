@@ -1,4 +1,5 @@
 import Foundation
+import GekoCache
 import GekoCore
 import GekoSupport
 import ProjectDescription
@@ -35,34 +36,32 @@ protocol GenerationScriptCaching: AnyObject {
     ) throws -> GenerationScriptCache.Outcome
 }
 
-/// An opt-in local execution cache for cache-profile target scripts. Its configuration
-/// file explicitly promises complete dependency declarations for every cached script name.
-/// The experiment intentionally does not change artifact hashes or the manifest interface.
+/// An opt-in local execution cache for cache-profile target scripts. The script cache key
+/// reuses `TargetScriptsContentHasher`; undeclared dependencies are a project concern and are
+/// expected to be declared as script input paths.
 final class GenerationScriptCache: GenerationScriptCaching {
     /// GEKO_CONFIG_ variables are excluded from manifest inputs, so on/off uses identical artifact keys.
-    static let configurationEnvironmentKey = Constants.EnvironmentVariables.experimentalScriptCache.rawValue
+    static let enabledEnvironmentKey = Constants.EnvironmentVariables.scriptCacheEnabled.rawValue
 
-    /// Returns true when the experimental script cache is enabled through the environment.
+    /// Returns true when the script cache is enabled through the environment.
     static var isEnabled: Bool {
-        Environment.shared.generationScriptCacheConfigurationPath != nil
+        Environment.shared.isScriptCacheEnabled
     }
 
-    /// Returns an enabled cache for the given workspace, or nil when the feature is off or
-    /// its configuration is unusable. A broken configuration disables the cache and never
-    /// fails the generation.
-    static func makeIfEnabled(workspacePath: AbsolutePath) -> GenerationScriptCaching? {
-        guard let path = Environment.shared.generationScriptCacheConfigurationPath else { return nil }
-        do {
-            return try GenerationScriptCache(
-                configurationPath: AbsolutePath(validating: path, relativeTo: FileHandler.shared.currentPath),
-                workspacePath: workspacePath
-            )
-        } catch {
-            logger.warning(
-                "Generation script cache disabled: could not load configuration at \(path): \(error)"
-            )
+    /// Returns a cache for the given workspace, or nil when the feature is off.
+    static func make(
+        workspacePath: AbsolutePath,
+        cacheProfile: ProjectDescription.Cache.Profile
+    ) -> GenerationScriptCaching? {
+        guard isEnabled else { return nil }
+        guard let storeDirectory = try? LogDirectoriesProvider().logDirectory(for: .generateMetadata) else {
             return nil
         }
+        return GenerationScriptCache(
+            workspacePath: workspacePath,
+            cacheProfile: cacheProfile,
+            storeDirectory: storeDirectory
+        )
     }
 
     struct Invocation {
@@ -71,8 +70,9 @@ final class GenerationScriptCache: GenerationScriptCaching {
         let directory: AbsolutePath
         let environment: [String: String]
         let inputs: [String]
-        let sharedInputs: [String]
+        let toolInputs: [String]
         let outputs: [String]
+        let script: TargetScript
     }
 
     struct Declaration {
@@ -92,17 +92,9 @@ final class GenerationScriptCache: GenerationScriptCaching {
         let digest: String
     }
 
-    struct Signature: Encodable {
-        let version: Int
-        let command: [String]
-        let directory: String
-        let environment: [String: String]
-        let inputs: [String]
-        let sharedInputs: [String]
-        let outputs: [String]
-    }
-
     struct Record: Codable {
+        static let version = 1
+
         let version: Int
         let inputs: String
         let outputs: String
@@ -120,30 +112,33 @@ final class GenerationScriptCache: GenerationScriptCaching {
 
     // MARK: - Attributes
 
-    private let configuration: Configuration
     private let workspacePath: AbsolutePath
-    private let cachePath: AbsolutePath
+    private let cacheProfile: ProjectDescription.Cache.Profile
+    private let storePath: AbsolutePath
     private let fileManager = FileManager.default
     private let hasher = ContentHasher()
+    private let targetScriptsHasher = TargetScriptsContentHasher(contentHasher: ContentHasher())
+    private let storeLock = NSLock()
+    private var records: [String: Record]
     private let snapshotLock = NSLock()
-    private var sharedSnapshots: [String: SharedSnapshot] = [:]
-
-    struct Configuration: Decodable {
-        struct Policy: Decodable {
-            let additionalInputs: [String]
-        }
-        let scripts: [String: Policy]
-    }
+    private var rootSnapshots: [String: SharedSnapshot] = [:]
 
     // MARK: - Init
 
-    init(configurationPath: AbsolutePath, workspacePath: AbsolutePath) throws {
-        configuration = try JSONDecoder().decode(
-            Configuration.self,
-            from: Data(contentsOf: configurationPath.url)
-        )
+    init(
+        workspacePath: AbsolutePath,
+        cacheProfile: ProjectDescription.Cache.Profile,
+        storeDirectory: AbsolutePath
+    ) {
         self.workspacePath = workspacePath
-        cachePath = workspacePath.appending(components: ".geko", "GenerationScriptCache-v1")
+        self.cacheProfile = cacheProfile
+        storePath = storeDirectory.appending(component: Constants.GekoUserCacheDirectory.generateScriptHashesName)
+        if let data = try? Data(contentsOf: storePath.url),
+           let stored = try? JSONDecoder().decode([String: Record].self, from: data) {
+            records = stored
+        } else {
+            records = [:]
+        }
     }
 
     // MARK: - GenerationScriptCaching
@@ -156,8 +151,7 @@ final class GenerationScriptCache: GenerationScriptCaching {
         directory: AbsolutePath,
         environment: [String: String]
     ) -> Invocation? {
-        guard let policy = configuration.scripts[script.name],
-              script.basedOnDependencyAnalysis != false,
+        guard script.basedOnDependencyAnalysis != false,
               script.dependencyFile == nil
         else { return nil }
 
@@ -166,16 +160,12 @@ final class GenerationScriptCache: GenerationScriptCaching {
             let inputs = declaration.inputs
             let outputs = declaration.outputs
             guard !inputs.isEmpty, !outputs.isEmpty else { return nil }
-            var sharedInputs = try policy.additionalInputs.map {
-                try resolve($0, relativeTo: workspacePath, environment: environment)
-            }
             // The shell is also a tool dependency; do not guess binaries hidden in arbitrary shell text.
-            sharedInputs.append(try resolve(script.shellPath, relativeTo: directory, environment: environment))
-            sharedInputs = Array(Set(sharedInputs)).sorted()
+            let toolInputs = [try resolve(script.shellPath, relativeTo: directory, environment: environment)]
 
-            for sharedInput in sharedInputs where !fileManager.fileExists(atPath: sharedInput) {
+            for toolInput in toolInputs where !fileManager.fileExists(atPath: toolInput) {
                 logger.warning(
-                    "Generation script cache: declared input \(sharedInput) does not exist, cache disabled for \(script.name)"
+                    "Generation script cache: declared input \(toolInput) does not exist, cache disabled for \(script.name)"
                 )
                 return nil
             }
@@ -185,14 +175,14 @@ final class GenerationScriptCache: GenerationScriptCaching {
                 if fileManager.fileExists(atPath: output, isDirectory: &isDirectory), isDirectory.boolValue {
                     return nil
                 }
-                guard !(inputs + sharedInputs).contains(where: { contains($0, output) || contains(output, $0) }),
-                      !contains(cachePath.pathString, output),
-                      !(inputs + sharedInputs).contains(where: { contains($0, cachePath.pathString) })
+                guard !(inputs + toolInputs).contains(where: { contains($0, output) || contains(output, $0) }),
+                      !contains(storePath.pathString, output),
+                      !(inputs + toolInputs).contains(where: { contains($0, storePath.pathString) })
                 else { return nil }
             }
             return Invocation(
                 identity: identity, command: command, directory: directory, environment: environment,
-                inputs: inputs, sharedInputs: sharedInputs, outputs: outputs
+                inputs: inputs, toolInputs: toolInputs, outputs: outputs, script: script
             )
         } catch {
             logger.debug("Generation script cache: declarations for \(script.name) are not cacheable: \(error)")
@@ -230,7 +220,7 @@ final class GenerationScriptCache: GenerationScriptCaching {
     func independent(_ invocations: [Invocation?], declarations: [Declaration?]? = nil) -> [Invocation?] {
         var result = invocations
         let declarations = declarations ?? invocations.map { invocation in
-            invocation.map { Declaration(inputs: $0.inputs + $0.sharedInputs, outputs: $0.outputs) }
+            invocation.map { Declaration(inputs: $0.inputs + $0.toolInputs, outputs: $0.outputs) }
         }
         // Unknown I/O cannot prove that an uncached writer will leave cached outputs alone.
         guard declarations.count == invocations.count, declarations.allSatisfy({ $0 != nil }) else {
@@ -243,8 +233,8 @@ final class GenerationScriptCache: GenerationScriptCaching {
             guard let lhs = declarations[first] else { continue }
             for second in invocations.indices where second > first {
                 guard let rhs = declarations[second] else { continue }
-                let lhsInputs = lhs.inputs + (invocations[first]?.sharedInputs ?? [])
-                let rhsInputs = rhs.inputs + (invocations[second]?.sharedInputs ?? [])
+                let lhsInputs = lhs.inputs + (invocations[first]?.toolInputs ?? [])
+                let rhsInputs = rhs.inputs + (invocations[second]?.toolInputs ?? [])
                 let conflict = lhs.outputs.contains { output in
                     rhs.outputs.contains(output) || rhsInputs.contains { contains($0, output) }
                 } || rhs.outputs.contains { output in
@@ -266,89 +256,119 @@ final class GenerationScriptCache: GenerationScriptCaching {
             return .ineligible
         }
 
-        let recordPath = cachePath.appending(component: try hasher.hash(invocation.identity) + ".json")
-        let lock = FileLock(at: cachePath.appending(component: recordPath.basename + ".lock"))
+        let inputHash: String
         do {
-            try fileManager.createDirectory(at: cachePath.url, withIntermediateDirectories: true)
-            logger.debug("Generation script cache: acquiring record lock \(recordPath.basename)")
-            try lock.lock()
+            inputHash = try fingerprint(invocation)
         } catch {
-            logger.debug("Generation script cache unavailable: \(error)")
+            logger.debug("Generation script cache: unavailable input snapshot for \(invocation.identity): \(error)")
             try run()
             return .ineligible
         }
-        defer { lock.unlock() }
-
-        guard let inputHash = try? fingerprint(invocation) else {
-            logger.debug("Generation script cache: unavailable input snapshot for \(invocation.identity)")
-            try? fileManager.removeItem(at: recordPath.url)
-            try run()
-            return .ineligible
-        }
-        if let data = try? Data(contentsOf: recordPath.url),
-           let record = try? JSONDecoder().decode(Record.self, from: data),
-           record.version == 1, record.inputs == inputHash,
-           let outputs = try? outputFingerprint(invocation.outputs), outputs == record.outputs,
-           (try? fingerprint(invocation)) == inputHash,
-           (try? refreshOutputModificationDates(invocation.outputs)) != nil {
+        if matchesStoredRecord(invocation, inputHash: inputHash) {
             return .skipped
         }
 
         // A failed or interrupted execution must never retain a prior success record.
-        try? fileManager.removeItem(at: recordPath.url)
+        removeRecord(invocation.identity)
         try run()
         if let after = try? fingerprint(invocation), after == inputHash,
            let outputs = try? outputFingerprint(invocation.outputs) {
-            do {
-                let data = try encode(Record(version: 1, inputs: inputHash, outputs: outputs))
-                try data.write(to: recordPath.url, options: .atomic)
-            } catch {
-                logger.debug("Generation script cache record could not be saved: \(error)")
-            }
+            storeRecord(Record(version: Record.version, inputs: inputHash, outputs: outputs), for: invocation.identity)
         }
         return .executed
+    }
+
+    // MARK: - Store
+
+    private func matchesStoredRecord(_ invocation: Invocation, inputHash: String) -> Bool {
+        storeLock.lock()
+        let record = records[invocation.identity]
+        storeLock.unlock()
+        guard let record, record.version == Record.version, record.inputs == inputHash else { return false }
+        guard let outputs = try? outputFingerprint(invocation.outputs), outputs == record.outputs else { return false }
+        // Brings skipped outputs' modification dates ahead of their inputs so Xcode's dependency
+        // analysis does not rerun the corresponding build phases after generation.
+        guard (try? refreshOutputModificationDates(invocation.outputs)) != nil else { return false }
+        return true
+    }
+
+    private func removeRecord(_ identity: String) {
+        storeLock.lock()
+        let removed = records.removeValue(forKey: identity) != nil
+        if removed {
+            persistLocked()
+        }
+        storeLock.unlock()
+    }
+
+    private func storeRecord(_ record: Record, for identity: String) {
+        storeLock.lock()
+        records[identity] = record
+        persistLocked()
+        storeLock.unlock()
+    }
+
+    private func persistLocked() {
+        do {
+            try fileManager.createDirectory(at: storePath.removingLastComponent().url, withIntermediateDirectories: true)
+            try encode(records).write(to: storePath.url, options: .atomic)
+        } catch {
+            logger.debug("Generation script cache store could not be saved: \(error)")
+        }
     }
 
     // MARK: - Fingerprinting
 
     private func fingerprint(_ invocation: Invocation) throws -> String {
-        let signature = Signature(
-            version: 1, command: invocation.command, directory: invocation.directory.pathString,
-            environment: invocation.environment, inputs: invocation.inputs,
-            sharedInputs: invocation.sharedInputs, outputs: invocation.outputs
+        // The house target-script hash covers declared I/O contents, name, tool, order and arguments.
+        let (targetScriptHash, _) = try targetScriptsHasher.hash(
+            targetScripts: [invocation.script],
+            sourceRootPath: workspacePath,
+            cacheProfile: cacheProfile
         )
-        var entries = [Entry(path: "invocation", kind: "signature", digest: try hasher.hash(encode(signature)))]
-        entries.append(Entry(path: "inputs", kind: "tree", digest: try snapshot(invocation.inputs)))
-        for path in invocation.sharedInputs {
-            entries.append(Entry(path: path, kind: "shared", digest: try sharedSnapshot(path)))
+        var strings = [
+            targetScriptHash,
+            invocation.command.joined(separator: "\n"),
+        ]
+        strings.append(contentsOf: invocation.environment.sorted { $0.key < $1.key }.map { "\($0.key)=\($0.value)" })
+        for toolInput in invocation.toolInputs {
+            strings.append(try hasher.hash(path: AbsolutePath(validating: toolInput)))
         }
-        return try hasher.hash(encode(entries))
+        // Directory snapshots include member names, so renames inside an input directory invalidate.
+        strings.append(try snapshot(invocation.inputs))
+        return try hasher.hash(strings)
     }
 
-    /// Memoization is in-memory only, guarded by current membership and nanosecond change timestamps.
-    /// Resource and output bytes are always read; persisted records never trust file timestamps.
-    private func sharedSnapshot(_ path: String) throws -> String {
-        snapshotLock.lock()
-        defer { snapshotLock.unlock() }
-        let metadata = try snapshot([path], metadataOnly: true)
-        if let saved = sharedSnapshots[path], saved.metadata == metadata { return saved.digest }
-        let digest = try snapshot([path])
-        guard metadata == (try snapshot([path], metadataOnly: true)) else {
-            throw GenerationScriptCacheError.unsupportedPath(path)
-        }
-        sharedSnapshots[path] = SharedSnapshot(metadata: metadata, digest: digest)
-        return digest
-    }
-
-    /// Brings skipped outputs' modification dates ahead of their inputs so Xcode's dependency
-    /// analysis does not rerun the corresponding build phases after generation.
     private func refreshOutputModificationDates(_ paths: [String]) throws {
         for path in paths {
             try fileManager.setAttributes([.modificationDate: Date()], ofItemAtPath: path)
         }
     }
 
-    private func snapshot(_ roots: [String], metadataOnly: Bool = false) throws -> String {
+    /// Inputs shared by every script (tool binaries, template trees) are memoized per run,
+    /// guarded by change timestamps. Persisted records never trust file timestamps.
+    private func snapshot(_ roots: [String]) throws -> String {
+        var entries: [Entry] = []
+        for root in roots {
+            entries.append(Entry(path: root, kind: "root", digest: try memoizedSnapshot(root)))
+        }
+        return try hasher.hash(encode(entries))
+    }
+
+    private func memoizedSnapshot(_ path: String) throws -> String {
+        snapshotLock.lock()
+        defer { snapshotLock.unlock() }
+        let metadata = try snapshot([path], metadataOnly: true)
+        if let saved = rootSnapshots[path], saved.metadata == metadata { return saved.digest }
+        let digest = try snapshot([path], metadataOnly: false)
+        guard metadata == (try snapshot([path], metadataOnly: true)) else {
+            throw GenerationScriptCacheError.unsupportedPath(path)
+        }
+        rootSnapshots[path] = SharedSnapshot(metadata: metadata, digest: digest)
+        return digest
+    }
+
+    private func snapshot(_ roots: [String], metadataOnly: Bool) throws -> String {
         var entries: [Entry] = []
         for root in roots {
             try appendSnapshot(root, entries: &entries, metadataOnly: metadataOnly)
@@ -428,6 +448,9 @@ private extension GenerationScriptCache {
         guard !result.isEmpty, !result.contains("$"),
               result.rangeOfCharacter(from: CharacterSet(charactersIn: "*?[")) == nil
         else { throw GenerationScriptCacheError.unsupportedPath(value) }
+        if result.hasPrefix("/") {
+            return try AbsolutePath(validating: result).pathString
+        }
         return try AbsolutePath(validating: result, relativeTo: directory).pathString
     }
 

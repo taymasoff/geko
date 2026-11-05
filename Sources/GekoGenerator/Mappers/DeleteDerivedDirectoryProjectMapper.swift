@@ -13,7 +13,7 @@ public final class DeleteDerivedDirectoryWorkspaceMapper: WorkspaceMapping {
     public init(
         derivedDirectoryName: String = Constants.DerivedDirectory.name,
         fileHandler: FileHandling = FileHandler.shared,
-        preserveGeneratedDrafts: Bool = Environment.shared.generationScriptCacheConfigurationPath != nil
+        preserveGeneratedDrafts: Bool = Environment.shared.isScriptCacheEnabled
     ) {
         self.derivedDirectoryName = derivedDirectoryName
         self.fileHandler = fileHandler

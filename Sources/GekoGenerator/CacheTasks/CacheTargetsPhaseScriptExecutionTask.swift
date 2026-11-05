@@ -64,7 +64,7 @@ public final class CacheTargetsPhaseScriptExecutionTask: CacheTask {
     @Atomic var preparedScripts: [PreparedScript] = []
     private let clock: Clock
     private let timeTakenLoggerFormatter: TimeTakenLoggerFormatting
-    private let makeScriptCache: (AbsolutePath) -> GenerationScriptCaching?
+    private let makeScriptCache: (AbsolutePath, ProjectDescription.Cache.Profile) -> GenerationScriptCaching?
 
     // MARK: - Init
 
@@ -72,14 +72,14 @@ public final class CacheTargetsPhaseScriptExecutionTask: CacheTask {
         self.init(
             clock: WallClock(),
             timeTakenLoggerFormatter: TimeTakenLoggerFormatter(),
-            makeScriptCache: GenerationScriptCache.makeIfEnabled
+            makeScriptCache: GenerationScriptCache.make
         )
     }
 
     init(
         clock: Clock,
         timeTakenLoggerFormatter: TimeTakenLoggerFormatting,
-        makeScriptCache: @escaping (AbsolutePath) -> GenerationScriptCaching?
+        makeScriptCache: @escaping (AbsolutePath, ProjectDescription.Cache.Profile) -> GenerationScriptCaching?
     ) {
         self.clock = clock
         self.timeTakenLoggerFormatter = timeTakenLoggerFormatter
@@ -148,7 +148,7 @@ public final class CacheTargetsPhaseScriptExecutionTask: CacheTask {
             }
         }
 
-        let cache = makeScriptCache(graph.workspace.path)
+        let cache = makeScriptCache(graph.workspace.path, context.cacheProfile)
         let timer = clock.startTimer()
         let scripts = _preparedScripts.wrappedValue
         let declarations = scripts.map { script in

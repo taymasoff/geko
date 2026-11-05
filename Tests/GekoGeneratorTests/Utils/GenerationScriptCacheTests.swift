@@ -9,7 +9,7 @@ import XCTest
 
 final class GenerationScriptCacheTests: GekoUnitTestCase {
     private var root: AbsolutePath!
-    private var configuration: AbsolutePath!
+    private var storeDirectory: AbsolutePath!
     private var cache: GenerationScriptCache!
     private var runs = 0
 
@@ -28,10 +28,17 @@ final class GenerationScriptCacheTests: GekoUnitTestCase {
         try write("first", to: "input.txt")
         try write("template", to: "templates/main.stencil")
         try write("tool v1", to: "tools/generator")
-        configuration = root.appending(component: "cache.json")
-        try write(#"{"scripts":{"SwiftGen":{"additionalInputs":["templates","tools/generator"]}}}"#, to: "cache.json")
-        cache = try GenerationScriptCache(configurationPath: configuration, workspacePath: root)
+        storeDirectory = root.appending(components: ".geko", "GenerateMetadata")
+        cache = makeCache()
         runs = 0
+    }
+
+    private func makeCache() -> GenerationScriptCache {
+        GenerationScriptCache(
+            workspacePath: root,
+            cacheProfile: ProjectDescription.Cache.Profile(name: "Development", configuration: "Debug", platforms: [:]),
+            storeDirectory: storeDirectory
+        )
     }
 
     private func write(_ contents: String, to path: String) throws {
@@ -40,7 +47,10 @@ final class GenerationScriptCacheTests: GekoUnitTestCase {
         try contents.write(to: url, atomically: true, encoding: .utf8)
     }
 
-    private func script(inputs: [String] = ["input.txt"], output: String = "Generated/Resources.swift") -> TargetScript {
+    private func script(
+        inputs: [String] = ["input.txt", "templates", "tools/generator"],
+        output: String = "Generated/Resources.swift"
+    ) -> TargetScript {
         .pre(
             script: "generator", name: "SwiftGen",
             inputPaths: .list(inputs.map { root.appending(try! RelativePath(validating: $0)) }),
@@ -69,21 +79,15 @@ final class GenerationScriptCacheTests: GekoUnitTestCase {
         }
     }
 
-    func test_makeIfEnabled_whenEnvironmentIsUnset_returnsNil() {
+    func test_make_whenEnvironmentIsUnset_returnsNil() {
         // Given / When
-        let cache = GenerationScriptCache.makeIfEnabled(workspacePath: root)
+        let cache = GenerationScriptCache.make(
+            workspacePath: root,
+            cacheProfile: ProjectDescription.Cache.Profile(name: "Development", configuration: "Debug", platforms: [:])
+        )
 
         // Then
         XCTAssertNil(cache)
-    }
-
-    func test_init_whenConfigurationIsMissing_throws() {
-        XCTAssertThrowsError(
-            try GenerationScriptCache(
-                configurationPath: root.appending(component: "missing.json"),
-                workspacePath: root
-            )
-        )
     }
 
     func test_execute_whenRecordMatches_skipsAndRefreshesOutputModificationDate() throws {
@@ -91,7 +95,7 @@ final class GenerationScriptCacheTests: GekoUnitTestCase {
         XCTAssertEqual(try execute(), .executed)
         let output = root.appending(components: "Generated", "Resources.swift")
         let modified = try FileManager.default.attributesOfItem(atPath: output.pathString)[.modificationDate] as? Date
-        cache = try GenerationScriptCache(configurationPath: configuration, workspacePath: root)
+        cache = makeCache()
         try Thread.sleep(forTimeInterval: 0.05)
 
         // When
@@ -308,20 +312,17 @@ final class GenerationScriptCacheTests: GekoUnitTestCase {
         let environment = ["MASK_KEY": "private-key-must-not-be-saved"]
         XCTAssertEqual(try execute(invocation(environment: environment)), .executed)
         XCTAssertEqual(try execute(invocation(environment: environment, command: ["/bin/sh", "-c", "new-generator"])), .executed)
-        let records = root.appending(components: ".geko", "GenerationScriptCache-v1")
-        for file in try FileManager.default.contentsOfDirectory(atPath: records.pathString) where file.hasSuffix(".json") {
-            let contents = try String(contentsOf: records.appending(component: file).url, encoding: .utf8)
-            XCTAssertFalse(contents.contains("private-key-must-not-be-saved"))
-        }
+        let store = storeDirectory.appending(component: Constants.GekoUserCacheDirectory.generateScriptHashesName)
+        let contents = try String(contentsOf: store.url, encoding: .utf8)
+        XCTAssertFalse(contents.contains("private-key-must-not-be-saved"))
         XCTAssertEqual(runs, 5)
     }
 
-    func test_prepare_whenDeclaredSharedInputIsMissing_disablesCachingForTheScript() throws {
-        let missingToolConfiguration = root.appending(component: "missing-tool.json")
-        try write(#"{"scripts":{"SwiftGen":{"additionalInputs":["tools/missing"]}}}"#, to: "missing-tool.json")
-        let cache = try GenerationScriptCache(configurationPath: missingToolConfiguration, workspacePath: root)
+    func test_prepare_whenShellIsMissing_disablesCachingForTheScript() throws {
+        var action = script()
+        action.shellPath = root.appending(component: "missing-shell").pathString
 
-        XCTAssertNil(cache.prepare(script: script(), identity: "id", command: [], directory: root, environment: [:]))
+        XCTAssertNil(cache.prepare(script: action, identity: "id", command: [], directory: root, environment: [:]))
     }
 
     func test_execute_whenOutputDeletedModifiedOrTruncated_regenerates() throws {
@@ -360,11 +361,11 @@ final class GenerationScriptCacheTests: GekoUnitTestCase {
         XCTAssertEqual(try execute(), .skipped)
     }
 
-    func test_execute_whenRecordIsCorrupt_regenerates() throws {
+    func test_execute_whenStoreIsCorrupt_regenerates() throws {
         try execute()
-        let directory = root.appending(components: ".geko", "GenerationScriptCache-v1")
-        let record = try XCTUnwrap(FileManager.default.contentsOfDirectory(atPath: directory.pathString).first { $0.hasSuffix(".json") })
-        try "invalid JSON".write(to: directory.appending(component: record).url, atomically: true, encoding: .utf8)
+        let store = storeDirectory.appending(component: Constants.GekoUserCacheDirectory.generateScriptHashesName)
+        try "invalid JSON".write(to: store.url, atomically: true, encoding: .utf8)
+        cache = makeCache()
         XCTAssertEqual(try execute(), .executed)
         XCTAssertEqual(try execute(), .skipped)
     }
@@ -372,9 +373,7 @@ final class GenerationScriptCacheTests: GekoUnitTestCase {
     func test_fileLists_expandVariablesAndTrackBothListAndReferencedContents() throws {
         try write("# resources\n$(SRCROOT)/input.txt\n", to: "inputs.xcfilelist")
         try write("${SRCROOT}/Generated/Resources.swift\n", to: "outputs.xcfilelist")
-        var action = script()
-        action.inputPaths = []
-        action.outputPaths = []
+        var action = script(inputs: [])
         action.inputFileListPaths = [root.appending(component: "inputs.xcfilelist")]
         action.outputFileListPaths = [root.appending(component: "outputs.xcfilelist")]
         let environment = ["SRCROOT": root.pathString]
@@ -388,8 +387,7 @@ final class GenerationScriptCacheTests: GekoUnitTestCase {
     }
 
     func test_prepare_whenDeclarationsAreIncompleteUnsupportedOrOverlapping_returnsNil() throws {
-        var action = script()
-        action.inputPaths = []
+        var action = script(inputs: [])
         XCTAssertNil(cache.prepare(script: action, identity: "id", command: [], directory: root, environment: [:]))
         action = script()
         action.basedOnDependencyAnalysis = false
@@ -434,9 +432,9 @@ final class GenerationScriptCacheTests: GekoUnitTestCase {
         XCTAssertTrue(cache.independent([first, nil], declarations: declarations).allSatisfy { $0 == nil })
     }
 
-    func test_execute_whenInstancesRunConcurrently_runsOneProducerAndReusesItsOutput() throws {
+    func test_execute_whenInstancesRunConcurrently_completesAndLeavesAReusableRecord() throws {
         let request = try invocation()
-        let other = try GenerationScriptCache(configurationPath: configuration, workspacePath: root)
+        let other = makeCache()
         let state = Atomic(wrappedValue: (runs: 0, errors: [Error]()))
         DispatchQueue.concurrentPerform(iterations: 2) { index in
             do {
@@ -445,10 +443,11 @@ final class GenerationScriptCacheTests: GekoUnitTestCase {
                     Thread.sleep(forTimeInterval: 0.02)
                     try write("enum Resources {}", to: "Generated/Resources.swift")
                 }
-            } catch { state.modify { $0.errors.append(error) } }
+            } catch { state.modify { state in state.errors.append(error) } }
         }
         XCTAssertTrue(state.wrappedValue.errors.isEmpty)
-        XCTAssertEqual(state.wrappedValue.runs, 1)
+        XCTAssertEqual(state.wrappedValue.runs, 2)
+        XCTAssertEqual(try execute(), .skipped)
     }
 
     func test_execute_whenRecordedOutputIsLegitimatelyEmpty_canBeReused() throws {

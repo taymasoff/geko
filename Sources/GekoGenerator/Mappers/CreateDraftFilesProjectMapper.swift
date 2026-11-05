@@ -9,7 +9,7 @@ public final class CreateDraftFilesProjectMapper: ProjectMapping {
 
     public init(
         fileHandler: FileHandling = FileHandler.shared,
-        preserveGeneratedDrafts: Bool = Environment.shared.generationScriptCacheConfigurationPath != nil
+        preserveGeneratedDrafts: Bool = Environment.shared.isScriptCacheEnabled
     ) {
         self.fileHandler = fileHandler
         self.preserveGeneratedDrafts = preserveGeneratedDrafts

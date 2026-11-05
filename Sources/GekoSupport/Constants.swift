@@ -34,6 +34,7 @@ public enum Constants {
         public static let name = ".geko"
         public static let versionsDir = "Versions"
         public static let generateMetadataName = "generate_metadata.json"
+        public static let generateScriptHashesName = "generate_script_hashes.json"
     }
 
     public enum DependenciesDirectory {
@@ -94,7 +95,7 @@ public enum Constants {
         case requestTimeout = "GEKO_REQUEST_TIMEOUT"
         case swiftModuleCache = "GEKO_SWIFTMODULE_CACHE_ENABLED"
         case forceBuildCacheDirectory = "GEKO_CONFIG_BUILD_CACHE_DIR"
-        case experimentalScriptCache = "GEKO_CONFIG_EXPERIMENTAL_SCRIPT_CACHE"
+        case scriptCacheEnabled = "GEKO_CONFIG_SCRIPT_CACHE_ENABLED"
         case experimentalGenerateHashOnly = "GEKO_CONFIG_EXPERIMENTAL_GENERATE_HASH_ONLY"
 
         // Hidden variables meant for testing
